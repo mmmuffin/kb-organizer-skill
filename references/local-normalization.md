@@ -11,7 +11,7 @@ Use local-folder mode when the input is a filesystem directory rather than a web
 
 ## File handling defaults
 
-- `md`, `txt`: wrap in metadata and keep text intact
+- `md`, `txt`: wrap in metadata and keep text intact; when Markdown contains local image references, preserve the image, rewrite the normalized path to the packaged `images/` artifact, and link the image back to the document
 - `html`, `htm`: extract main body text and local image references
 - `csv`: preserve original and normalize table content
 - `xlsx`, `xls`: extract sheet tables into Markdown sections
