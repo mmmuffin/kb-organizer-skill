@@ -13,17 +13,19 @@ The organizer should expose one OCR interface that returns:
 
 ## Preferred backend order
 
-1. explicit backend selected by the caller
-2. `paddleocr` if available
-3. `tesseract` CLI if available
-4. unavailable status if no OCR engine exists
+1. explicit profile selected by the caller
+2. `mobile` profile via PaddleOCR
+3. `server` profile via PaddleOCR when explicitly requested
+4. `tesseract` CLI if PaddleOCR is unavailable
+5. unavailable status if no OCR engine exists
 
 ## Current v2 strategy
 
-- use `PaddleOCR` as the primary OCR engine for:
+- use `PaddleOCR mobile` as the default OCR engine for:
   - standalone images
   - downloaded web images
   - rasterized PDF pages during scanned-PDF fallback
+- keep `PaddleOCR server` as an opt-in heavier profile
 - keep `tesseract` CLI as a lightweight fallback
 - do not require OCR for the whole run to succeed
 
