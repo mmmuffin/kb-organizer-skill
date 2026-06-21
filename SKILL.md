@@ -64,6 +64,7 @@ The organizer emits a package like:
 - Preserve originals under `originals/local/`.
 - Normalize text-like files into Markdown under `normalized/`.
 - Preserve standalone images and attach OCR/metadata when possible.
+- Prefer Poppler `pdftotext` for text PDFs, and fall back to page rasterization + OCR for scanned PDFs.
 - Use parent directories as the default domain/topic grouping heuristic.
 
 For local normalization details, read:
@@ -94,6 +95,8 @@ For website-specific rules, read:
   - OCR text path
   - OCR status
 - OCR is best-effort and backend-pluggable. If OCR is unavailable or fails, preserve the image and mark the failure in metadata instead of dropping the image.
+- Default OCR preference is PaddleOCR first, then `tesseract` CLI.
+- For scanned PDFs, rasterize pages with Poppler `pdftoppm` and run the same OCR backend on the page images.
 
 OCR contract and fallback behavior are in:
 - `references/ocr-backends.md`
