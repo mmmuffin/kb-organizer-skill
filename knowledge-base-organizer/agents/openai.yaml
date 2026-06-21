@@ -1,4 +1,0 @@
-interface:
-  display_name: "Knowledge Base Organizer"
-  short_description: "Normalize local or web docs into a retrieval-ready package."
-  default_prompt: "Use $knowledge-base-organizer to turn a local folder or documentation website into a retrieval-ready local knowledge package with manifests, indices, and image OCR metadata."
