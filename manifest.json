@@ -1,0 +1,14 @@
+{
+  "name": "knowledge-base-organizer",
+  "version": "1.0.0",
+  "category": "Knowledge Base / Organization",
+  "description": "Organize a local folder or documentation website into a retrieval-ready local knowledge package with normalized Markdown, preserved originals, image OCR metadata, and retrieval-oriented manifests.",
+  "homepage": "https://github.com/mmmuffin/kb-organizer-skill",
+  "compat": [
+    "codex-cli",
+    "claude-code",
+    "cursor",
+    "gemini-cli",
+    "opencode"
+  ]
+}
