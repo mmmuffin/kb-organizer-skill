@@ -9,13 +9,20 @@ Use this skill to perform the first-stage knowledge-base pipeline: inspect a sou
 
 ## Quick Start
 
+Before large runs, prefer:
+
+```bash
+python3 scripts/organize_kb.py --check-deps
+```
+
 Choose the source type, then run the organizer script:
 
 ```bash
 python3 scripts/organize_kb.py \
   --input /absolute/path/to/source-folder \
   --output /absolute/path/to/organized-kb \
-  --mode local
+  --mode local \
+  --ocr-profile mobile
 ```
 
 ```bash
@@ -23,10 +30,12 @@ python3 scripts/organize_kb.py \
   --input https://docs.example.com/start-page \
   --output /absolute/path/to/organized-kb \
   --mode web \
+  --ocr-profile mobile \
   --crawl-limit 40
 ```
 
 Default rule: always write to a new output directory. Do not mutate the source knowledge base unless the user explicitly asks for a different workflow.
+Default runtime profile: `mobile`.
 
 ## Workflow
 
@@ -35,6 +44,8 @@ Default rule: always write to a new output directory. Do not mutate the source k
 - Determine whether the input is a local folder, a documentation URL, or ambiguous.
 - Prefer `--mode auto` only when the source type is obvious from the input.
 - Estimate whether the source is primarily text, document files, or image-heavy.
+- Run `--check-deps` first when the environment is unknown.
+- If dependencies are missing, prefer the `mobile` profile bootstrap path.
 
 ### 2. Normalize into a new package
 
@@ -64,7 +75,7 @@ The organizer emits a package like:
 - Preserve originals under `originals/local/`.
 - Normalize text-like files into Markdown under `normalized/`.
 - Preserve standalone images and attach OCR/metadata when possible.
-- Prefer Poppler `pdftotext` for text PDFs, and fall back to page rasterization + OCR for scanned PDFs.
+- Prefer Poppler `pdftotext` for text PDFs, and fall back to `pypdf` then page rasterization + OCR for scanned PDFs.
 - Use parent directories as the default domain/topic grouping heuristic.
 
 For local normalization details, read:
@@ -95,7 +106,9 @@ For website-specific rules, read:
   - OCR text path
   - OCR status
 - OCR is best-effort and backend-pluggable. If OCR is unavailable or fails, preserve the image and mark the failure in metadata instead of dropping the image.
-- Default OCR preference is PaddleOCR first, then `tesseract` CLI.
+- Default OCR profile is PaddleOCR `mobile`. Only switch to `server` when the user explicitly wants higher OCR accuracy and accepts heavier runtime cost.
+- Only use `none` when the user explicitly accepts weaker image/PDF recall.
+- Default OCR backend preference is PaddleOCR first, then `tesseract` CLI fallback when available.
 - For scanned PDFs, rasterize pages with Poppler `pdftoppm` and run the same OCR backend on the page images.
 
 OCR contract and fallback behavior are in:
@@ -121,10 +134,12 @@ The run is only complete when:
 ## Resource Routing
 
 - Run `scripts/organize_kb.py` for actual organization work.
+- Use `scripts/bootstrap_env.py --profile mobile` when a new machine needs the recommended runtime stack.
 - Read `references/output-schema.md` to understand required output fields and directory layout.
 - Read `references/local-normalization.md` when the source is a local folder.
 - Read `references/web-ingestion.md` when the source is a documentation site.
 - Read `references/image-handling.md` and `references/ocr-backends.md` when images or OCR behavior matter.
+- Read `references/capability-matrix.md` when choosing between `none`, `mobile`, and `server`.
 
 ## Defaults
 
@@ -132,3 +147,4 @@ The run is only complete when:
 - Default downstream target: compatible with both retrieval skills and MCP wrappers
 - Default citation expectation for online sources: keep original online URLs in metadata
 - Default OCR expectation: OCR + surrounding context metadata, not full visual-semantic interpretation
+- Default install behavior: if recommended dependencies are missing, show the bootstrap plan and request confirmation before installation
