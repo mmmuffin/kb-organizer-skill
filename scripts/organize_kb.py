@@ -55,6 +55,7 @@ SPREADSHEET_EXTENSIONS = {".csv", ".tsv", ".xlsx", ".xls"}
 DOC_EXTENSIONS = {".docx", ".rtf", ".doc"}
 PDF_EXTENSIONS = {".pdf"}
 IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".tiff", ".svg"}
+MARKDOWN_IMAGE_PATTERN = re.compile(r"!\[(?P<alt>[^\]]*)\]\((?P<target><[^>]+>|[^)]+)\)")
 STOPWORDS = {
     "the", "and", "for", "with", "from", "that", "this", "into", "your", "have",
     "will", "when", "what", "how", "why", "are", "use", "using", "can", "not",
@@ -133,6 +134,15 @@ class ImageRecord:
     ocr_status: str
     ocr_backend: str | None = None
     ocr_error: str | None = None
+
+
+@dataclass
+class MarkdownImageReference:
+    alt: str
+    source_uri: str
+    output_ref: str
+    image_id: str
+    context_excerpt: str
 
 
 @dataclass
@@ -429,6 +439,7 @@ class Organizer:
                 self.source_map["documents"][source_uri] = {
                     "normalized_path": normalized_path,
                     "original_path": original_path,
+                    "related_images": related_images,
                 }
             except Exception as exc:
                 self.report.failures.append({"source": source_uri, "reason": str(exc)})
@@ -465,6 +476,7 @@ class Organizer:
                 self.source_map["documents"][url] = {
                     "normalized_path": normalized_path,
                     "original_path": original_path,
+                    "related_images": related_images,
                 }
             except Exception as exc:
                 self.report.failures.append({"source": url, "reason": str(exc)})
@@ -517,8 +529,9 @@ class Organizer:
     def normalize_local_document(self, path: Path, rel: Path, kind: str) -> tuple[str, str, list[str], str, list[str], list[str]]:
         if kind in {"markdown", "text"}:
             body = path.read_text(encoding="utf-8", errors="replace")
+            body, markdown_images = self.rewrite_markdown_image_references(path, body, rel.with_suffix(".md"))
             headings = extract_markdown_headings(body)
-            related_images: list[str] = []
+            related_images = [image.image_id for image in markdown_images]
         elif kind == "html":
             body, headings, related_images = self.normalize_html_common(
                 f"file://{path.resolve()}",
@@ -553,6 +566,46 @@ class Organizer:
         summary = first_summary_line(body)
         markdown = build_markdown_document(title, url, "web", self.synced_at, body, web_normalized_rel(url), None, related_images)
         return markdown, title, headings, summary, related_images
+
+    def rewrite_markdown_image_references(
+        self,
+        source_path: Path,
+        body: str,
+        doc_rel: Path,
+    ) -> tuple[str, list[MarkdownImageReference]]:
+        references: list[MarkdownImageReference] = []
+
+        def replace(match: re.Match[str]) -> str:
+            alt = clean_text(match.group("alt"))
+            target = normalize_markdown_image_target(match.group("target"))
+            if not target:
+                return match.group(0)
+
+            image_source = resolve_resource_uri(f"file://{source_path.resolve()}", target, source_path.parent)
+            image_record = self.ensure_image_record(
+                image_source=image_source,
+                parent_document_id=stable_id(f"doc::{source_path.resolve()}"),
+                title_or_alt=alt or Path(target).stem,
+                context_excerpt=markdown_image_context(body, match.start(), alt or Path(target).stem),
+            )
+            if image_record is None:
+                return match.group(0)
+
+            output_ref = relative_ref_to_image(image_record.image_path, doc_rel)
+            references.append(
+                MarkdownImageReference(
+                    alt=alt,
+                    source_uri=image_source,
+                    output_ref=output_ref or match.group("target"),
+                    image_id=image_record.id,
+                    context_excerpt=image_record.context_excerpt,
+                )
+            )
+            alt_text = alt or image_record.title_or_alt or Path(target).stem
+            return f"![{alt_text}]({output_ref or match.group('target')})"
+
+        rewritten = MARKDOWN_IMAGE_PATTERN.sub(replace, body)
+        return rewritten, references
 
     def normalize_html_common(
         self,
@@ -611,7 +664,13 @@ class Organizer:
         if node.name == "table":
             return html_table_to_markdown(node), headings, related_images
         if node.name == "img":
-            image_id, rel_path = self.process_image_from_html(node, source_uri, local_base, doc_rel)
+            image_id, rel_path = self.process_image_from_html(
+                node,
+                source_uri,
+                local_base,
+                doc_rel,
+                context_hint=html_image_context(node),
+            )
             if image_id and rel_path:
                 related_images.append(image_id)
                 alt = clean_text(node.get("alt", "") or node.get("title", "") or image_id)
@@ -633,46 +692,21 @@ class Organizer:
         source_uri: str,
         local_base: Path | None,
         doc_rel: Path,
+        context_hint: str = "",
     ) -> tuple[str | None, str | None]:
         src = tag.get("src")
         if not src:
             return None, None
         image_source = resolve_resource_uri(source_uri, src, local_base)
-        if image_source in self.image_id_by_source:
-            image_id = self.image_id_by_source[image_source]
-            image_path = next((image.image_path for image in self.images if image.id == image_id), None)
-            return image_id, relative_ref_to_image(image_path, doc_rel) if image_path else None
-
-        image_file = self.fetch_or_copy_image(image_source)
-        if image_file is None:
-            return None, None
-
-        image_id = stable_id(f"img::{image_source}")
-        ocr_text_path, ocr_status, backend, error = self.ocr_image(image_file, image_id)
-        width, height = image_dimensions(image_file)
-        alt = clean_text(tag.get("alt", "") or tag.get("title", "") or Path(urllib.parse.urlparse(image_source).path).stem)
-        record = ImageRecord(
-            id=image_id,
-            image_path=image_file.relative_to(self.output_dir).as_posix(),
-            source_uri=image_source,
+        image_record = self.ensure_image_record(
+            image_source=image_source,
             parent_document_id=stable_id(f"doc::{source_uri}"),
-            title_or_alt=alt,
-            context_excerpt=alt[:240],
-            ocr_text_path=ocr_text_path,
-            keywords=extract_keywords(alt),
-            width=width,
-            height=height,
-            ocr_status=ocr_status,
-            ocr_backend=backend,
-            ocr_error=error,
+            title_or_alt=clean_text(tag.get("alt", "") or tag.get("title", "") or Path(urllib.parse.urlparse(image_source).path).stem),
+            context_excerpt=context_hint,
         )
-        self.images.append(record)
-        self.image_id_by_source[image_source] = image_id
-        self.source_map["images"][image_source] = {
-            "image_path": record.image_path,
-            "ocr_text_path": ocr_text_path,
-        }
-        return image_id, relative_ref_to_image(record.image_path, doc_rel)
+        if image_record is None:
+            return None, None
+        return image_record.id, relative_ref_to_image(image_record.image_path, doc_rel)
 
     def process_image_file(self, path: Path, source_uri: str, parent_document_id: str | None, context: str) -> None:
         if source_uri in self.image_id_by_source:
@@ -704,6 +738,83 @@ class Organizer:
             "image_path": record.image_path,
             "ocr_text_path": ocr_text_path,
         }
+
+    def ensure_image_record(
+        self,
+        image_source: str,
+        parent_document_id: str | None,
+        title_or_alt: str,
+        context_excerpt: str,
+    ) -> ImageRecord | None:
+        existing = self.find_image_record(image_source)
+        if existing is not None:
+            self.merge_image_record(
+                existing,
+                parent_document_id=parent_document_id,
+                title_or_alt=title_or_alt,
+                context_excerpt=context_excerpt,
+            )
+            return existing
+
+        image_file = self.fetch_or_copy_image(image_source)
+        if image_file is None:
+            return None
+
+        image_id = stable_id(f"img::{image_source}")
+        ocr_text_path, ocr_status, backend, error = self.ocr_image(image_file, image_id)
+        width, height = image_dimensions(image_file)
+        record = ImageRecord(
+            id=image_id,
+            image_path=image_file.relative_to(self.output_dir).as_posix(),
+            source_uri=image_source,
+            parent_document_id=parent_document_id,
+            title_or_alt=title_or_alt,
+            context_excerpt=context_excerpt[:240],
+            ocr_text_path=ocr_text_path,
+            keywords=extract_keywords("\n".join(filter(None, [title_or_alt, context_excerpt]))),
+            width=width,
+            height=height,
+            ocr_status=ocr_status,
+            ocr_backend=backend,
+            ocr_error=error,
+        )
+        self.images.append(record)
+        self.image_id_by_source[image_source] = image_id
+        self.source_map["images"][image_source] = {
+            "image_path": record.image_path,
+            "ocr_text_path": ocr_text_path,
+        }
+        return record
+
+    def find_image_record(self, image_source: str) -> ImageRecord | None:
+        image_id = self.image_id_by_source.get(image_source)
+        if image_id is None:
+            return None
+        return next((image for image in self.images if image.id == image_id), None)
+
+    def merge_image_record(
+        self,
+        record: ImageRecord,
+        parent_document_id: str | None,
+        title_or_alt: str,
+        context_excerpt: str,
+    ) -> None:
+        if record.parent_document_id is None and parent_document_id is not None:
+            record.parent_document_id = parent_document_id
+
+        source_stem = Path(urllib.parse.urlparse(record.source_uri).path or record.source_uri).stem
+        if title_or_alt and (not record.title_or_alt or record.title_or_alt == source_stem):
+            record.title_or_alt = title_or_alt
+
+        if context_excerpt and (
+            not record.context_excerpt
+            or record.context_excerpt == source_stem
+            or record.context_excerpt == record.title_or_alt
+        ):
+            record.context_excerpt = context_excerpt[:240]
+
+        merged_keywords = dedupe(record.keywords + extract_keywords("\n".join(filter(None, [title_or_alt, context_excerpt]))))
+        record.keywords = merged_keywords
 
     def fetch_or_copy_image(self, image_source: str) -> Path | None:
         parsed = urllib.parse.urlparse(image_source)
@@ -802,7 +913,11 @@ class Organizer:
             target_dir = self.output_dir / "normalized" / directory if directory else self.output_dir / "normalized"
             target_dir.mkdir(parents=True, exist_ok=True)
             (target_dir / "data_structure.md").write_text(
-                generate_data_structure(directory, docs_by_dir.get(directory, []), sorted(child_dirs.get(directory, set()))),
+                generate_data_structure(
+                    directory,
+                    docs_by_dir.get(directory, []),
+                    sorted(child_dirs.get(directory, set())),
+                ),
                 encoding="utf-8",
             )
         (self.output_dir / "data_structure.md").write_text(generate_root_data_structure(self.documents, self.images), encoding="utf-8")
@@ -1082,7 +1197,6 @@ def build_markdown_document(
 
 
 def extract_markdown_headings(body: str) -> list[str]:
-    headings = []
     for line in body.splitlines():
         if line.startswith("#"):
             heading = clean_text(line.lstrip("#").strip())
@@ -1250,6 +1364,80 @@ def extract_text_from_paddle_result(result: Any) -> str:
     return "\n".join(dedupe(lines))
 
 
+def normalize_markdown_image_target(target: str) -> str:
+    target = target.strip()
+    if target.startswith("<") and target.endswith(">"):
+        return target[1:-1].strip()
+    for quote in [' "', " '", ' "']:
+        if quote in target:
+            candidate = target.split(quote, 1)[0].strip()
+            if candidate:
+                return candidate
+    return target
+
+
+def markdown_image_context(body: str, match_start: int, label: str) -> str:
+    lines = body.splitlines()
+    running = 0
+    line_index = 0
+    for idx, line in enumerate(lines):
+        running += len(line) + 1
+        if running > match_start:
+            line_index = idx
+            break
+
+    candidate_indexes = {line_index}
+    for direction in (-1, 1):
+        cursor = line_index
+        while 0 <= cursor + direction < len(lines):
+            cursor += direction
+            cleaned_line = MARKDOWN_IMAGE_PATTERN.sub(" ", lines[cursor])
+            cleaned = clean_text(cleaned_line.replace(label, " "))
+            if cleaned:
+                candidate_indexes.add(cursor)
+                break
+
+    candidates: list[str] = []
+    for idx in sorted(candidate_indexes):
+        cleaned_line = MARKDOWN_IMAGE_PATTERN.sub(" ", lines[idx])
+        cleaned = clean_text(cleaned_line.replace(label, " "))
+        if cleaned:
+            candidates.append(cleaned)
+    if label:
+        candidates.insert(0, label)
+    return " ".join(dedupe(candidates))[:240]
+
+
+def html_image_context(tag: Tag) -> str:
+    candidates: list[str] = []
+    for value in [tag.get("alt", ""), tag.get("title", "")]:
+        cleaned = clean_text(value)
+        if cleaned:
+            candidates.append(cleaned)
+
+    sibling_getters = [tag.previous_sibling, tag.next_sibling]
+    for sibling in sibling_getters:
+        if sibling is None:
+            continue
+        if isinstance(sibling, NavigableString):
+            cleaned = clean_text(str(sibling))
+        elif isinstance(sibling, Tag):
+            cleaned = clean_text(sibling.get_text(" ", strip=True))
+        else:
+            cleaned = ""
+        if cleaned:
+            candidates.append(cleaned)
+
+    parent = getattr(tag, "parent", None)
+    if isinstance(parent, Tag):
+        for sibling in parent.find_all(["p", "figcaption"], recursive=False):
+            cleaned = clean_text(sibling.get_text(" ", strip=True))
+            if cleaned:
+                candidates.append(cleaned)
+
+    return " ".join(dedupe(candidates))[:240]
+
+
 def find_content_root(soup: BeautifulSoup) -> Tag:
     for selector in ["main", "article", "#content", ".content", ".main-content", "body"]:
         node = soup.select_one(selector)
@@ -1293,6 +1481,8 @@ def html_table_to_markdown(tag: Tag) -> str:
 
 def generate_data_structure(directory: str, docs: list[DocumentRecord], child_dirs: list[str]) -> str:
     title = directory or "normalized"
+    related_image_count = sum(len(doc.related_images) for doc in docs)
+    provenances = sorted({doc.source_type for doc in docs})
     lines = [f"# {title}", "", "## Purpose"]
     lines.append(
         f"This directory contains normalized retrieval documents for `{directory}`."
@@ -1315,11 +1505,27 @@ def generate_data_structure(directory: str, docs: list[DocumentRecord], child_di
     if docs:
         lines.append(f"- Source types: {', '.join(sorted({doc.source_type for doc in docs}))}")
     lines.append("")
+    lines.append("## Source Provenance")
+    if provenances:
+        lines.append(f"- Provenance types: {', '.join(provenances)}")
+        lines.append(f"- Representative sources: {', '.join(dedupe([doc.source_uri for doc in docs])[:3])}")
+    else:
+        lines.append("- No source provenance recorded.")
+    lines.append("")
+    lines.append("## Image Notes")
+    if related_image_count:
+        lines.append(f"- Related images referenced by documents in this directory: {related_image_count}")
+        lines.append("- Treat this directory as image-aware during downstream retrieval.")
+    else:
+        lines.append("- No document-linked images were detected in this directory.")
+    lines.append("")
     return "\n".join(lines)
 
 
 def generate_root_data_structure(documents: list[DocumentRecord], images: list[ImageRecord]) -> str:
     domains = Counter(doc.domain for doc in documents)
+    source_types = sorted({doc.source_type for doc in documents})
+    image_linked = sum(1 for image in images if image.parent_document_id)
     lines = [
         "# Organized Knowledge Base",
         "",
@@ -1335,8 +1541,13 @@ def generate_root_data_structure(documents: list[DocumentRecord], images: list[I
         lines.append("- No documents were normalized.")
     lines.extend([
         "",
+        "## Source Provenance",
+        f"- Source types: {', '.join(source_types) if source_types else 'none'}",
+        f"- Representative sources: {', '.join(dedupe([doc.source_uri for doc in documents])[:5]) if documents else 'none'}",
+        "",
         "## Image Coverage",
         f"- Images preserved: {len(images)}",
+        f"- Images linked to parent documents: {image_linked}",
         f"- OCR successes: {sum(1 for image in images if image.ocr_status == 'ok')}",
         f"- OCR unavailable/failed: {sum(1 for image in images if image.ocr_status in {'failed', 'unavailable'})}",
         "",
@@ -1344,6 +1555,7 @@ def generate_root_data_structure(documents: list[DocumentRecord], images: list[I
         "- Use `manifest.json` for document-level retrieval.",
         "- Use `image_manifest.json` for image-aware retrieval and OCR hits.",
         "- Use `normalized/**/data_structure.md` for hierarchical navigation.",
+        "- Prefer document-linked images first when answering questions about screenshots, diagrams, or flows.",
         "",
     ])
     return "\n".join(lines)
