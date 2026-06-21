@@ -16,7 +16,7 @@ Use local-folder mode when the input is a filesystem directory rather than a web
 - `csv`: preserve original and normalize table content
 - `xlsx`, `xls`: extract sheet tables into Markdown sections
 - `docx`, `rtf`: use a supported text conversion path
-- `pdf`: prefer `pdftotext` from Poppler for text PDFs; if extracted text is missing or insufficient, rasterize pages with `pdftoppm` and OCR them
+- `pdf`: prefer `pdftotext` from Poppler for text PDFs; if extracted text is missing or insufficient, try `pypdf`, then rasterize pages with `pdftoppm` and OCR them
 - image files: preserve to `images/`, then OCR if possible
 
 ## PDF strategy
@@ -27,7 +27,7 @@ Process PDFs in layers:
 2. try `pdftotext` first for native-text PDFs
 3. optionally use a Python text fallback when available
 4. if the PDF still has no meaningful text, use `pdftoppm` to rasterize pages
-5. OCR rasterized pages with the configured OCR backend
+5. OCR rasterized pages with the configured OCR profile, defaulting to `mobile`
 6. write the final merged text into `normalized/`
 
 ## Topic grouping
