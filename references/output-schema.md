@@ -34,6 +34,10 @@ Each document entry must include:
 - `last_synced_at`
 - `source_last_modified`
 
+Document-linked images should be represented in `related_images` whenever the organizer can infer
+that an image belongs to the document through HTML embedding, Markdown image references, or other
+local source structure.
+
 ## `image_manifest.json`
 
 Each image entry must include:
@@ -57,6 +61,9 @@ Track both directions:
 - source URI/path -> normalized document
 - source URI/path -> preserved original
 - source URI/path -> images derived from that source
+
+When available, include document-level `related_images` so downstream retrieval can move from a
+document hit to image recall without reparsing the normalized body.
 
 ## `run_report.json`
 
