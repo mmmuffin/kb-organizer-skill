@@ -1,5 +1,7 @@
 # knowledge-base-organizer
 
+<img width="1536" height="1024" alt="image" src="https://github.com/user-attachments/assets/e4f81949-3ffc-4148-acc0-216ec8005083" />
+
 > 把在线文档站或本地资料夹，整理成一个适合后续检索、MCP 封装和 Agent 问答的本地知识包。
 
 这是一个面向 Codex 的 **知识库整理 Skill**。  
