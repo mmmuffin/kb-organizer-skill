@@ -12,6 +12,7 @@ import os
 import re
 import shutil
 import subprocess
+import tempfile
 import urllib.parse
 import xml.etree.ElementTree as ET
 from collections import Counter, defaultdict
@@ -96,11 +97,12 @@ class RunReport:
 class OCRBackend:
     def __init__(self, preferred: str = "auto") -> None:
         self.preferred = preferred
+        self._paddle_instance: Any | None = None
 
     def extract(self, image_path: Path) -> OCRResult:
         for backend in self._candidate_backends():
-            if backend == "pytesseract":
-                result = self._extract_pytesseract(image_path)
+            if backend == "paddleocr":
+                result = self._extract_paddleocr(image_path)
             elif backend == "tesseract-cli":
                 result = self._extract_tesseract_cli(image_path)
             elif backend == "none":
@@ -116,8 +118,8 @@ class OCRBackend:
             return [self.preferred]
         candidates: list[str] = []
         try:
-            import pytesseract  # type: ignore  # noqa: F401
-            candidates.append("pytesseract")
+            from paddleocr import PaddleOCR  # type: ignore  # noqa: F401
+            candidates.append("paddleocr")
         except Exception:
             pass
         if shutil.which("tesseract"):
@@ -125,14 +127,19 @@ class OCRBackend:
         candidates.append("none")
         return candidates
 
-    def _extract_pytesseract(self, image_path: Path) -> OCRResult:
+    def _extract_paddleocr(self, image_path: Path) -> OCRResult:
         try:
-            import pytesseract  # type: ignore
-            image = Image.open(image_path)
-            text = pytesseract.image_to_string(image).strip()
-            return OCRResult(text=text, backend="pytesseract", status="ok" if text else "empty")
+            from paddleocr import PaddleOCR  # type: ignore
+
+            if self._paddle_instance is None:
+                # Default to the general Chinese+English model family, which works
+                # reasonably well for mixed Chinese/English documentation screenshots.
+                self._paddle_instance = PaddleOCR(lang="ch")
+            result = self._paddle_instance.ocr(str(image_path), cls=True)
+            text = extract_text_from_paddle_result(result)
+            return OCRResult(text=text, backend="paddleocr", status="ok" if text else "empty")
         except Exception as exc:
-            return OCRResult(text="", backend="pytesseract", status="failed", error=str(exc))
+            return OCRResult(text="", backend="paddleocr", status="failed", error=str(exc))
 
     def _extract_tesseract_cli(self, image_path: Path) -> OCRResult:
         try:
@@ -336,7 +343,7 @@ class Organizer:
             headings = [path.stem]
             related_images = []
         elif kind == "pdf":
-            body = extract_pdf_text(path)
+            body = self.extract_pdf_document(path)
             headings = [path.stem]
             related_images = []
         else:
@@ -554,6 +561,34 @@ class Organizer:
             return rel.as_posix(), result.status, result.backend, result.error
         return None, result.status, result.backend, result.error
 
+    def extract_pdf_document(self, path: Path) -> str:
+        errors: list[str] = []
+
+        text = extract_pdf_text_via_pdftotext(path)
+        if pdf_has_meaningful_text(text):
+            return text
+        if shutil.which("pdftotext"):
+            errors.append("pdftotext produced no meaningful text")
+        else:
+            errors.append("pdftotext not available")
+
+        text = extract_pdf_text_via_pypdf(path)
+        if pdf_has_meaningful_text(text):
+            return text
+
+        text, ocr_errors = extract_pdf_text_via_ocr(path, self.ocr_backend)
+        if pdf_has_meaningful_text(text):
+            return text
+        errors.extend(ocr_errors)
+
+        if not errors:
+            if not shutil.which("pdftotext"):
+                errors.append("pdftotext not available")
+            if not shutil.which("pdftoppm"):
+                errors.append("pdftoppm not available")
+            errors.append("No PDF extraction backend produced usable text")
+        raise RuntimeError("; ".join(dedupe(errors)))
+
     def write_indices(self) -> None:
         docs_by_dir: defaultdict[str, list[DocumentRecord]] = defaultdict(list)
         child_dirs: defaultdict[str, set[str]] = defaultdict(set)
@@ -616,7 +651,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--input", required=True, help="Source folder path or documentation URL")
     parser.add_argument("--output", required=True, help="New output directory for the organized knowledge package")
     parser.add_argument("--mode", choices=["auto", "local", "web"], default="auto")
-    parser.add_argument("--ocr-backend", default="auto", help="OCR backend: auto, pytesseract, tesseract-cli, none")
+    parser.add_argument("--ocr-backend", default="auto", help="OCR backend: auto, paddleocr, tesseract-cli, none")
     parser.add_argument("--sitemap-url", help="Optional sitemap URL for web mode")
     parser.add_argument("--crawl-limit", type=int, default=40, help="Maximum number of pages to collect in web mode")
     parser.add_argument("--timeout", type=int, default=30, help="HTTP timeout in seconds")
@@ -737,26 +772,105 @@ def extract_text_via_textutil(path: Path) -> str:
     return completed.stdout.strip()
 
 
-def extract_pdf_text(path: Path) -> str:
+def extract_pdf_text_via_pdftotext(path: Path) -> str:
+    if not shutil.which("pdftotext"):
+        return ""
     try:
-        import pypdf  # type: ignore
-        reader = pypdf.PdfReader(str(path))
-        text = "\n".join(page.extract_text() or "" for page in reader.pages).strip()
-        if text:
-            return text
-    except Exception:
-        pass
-    if shutil.which("mdls"):
         completed = subprocess.run(
-            ["mdls", "-name", "kMDItemTextContent", "-raw", str(path)],
+            ["pdftotext", "-layout", "-enc", "UTF-8", str(path), "-"],
             capture_output=True,
             text=True,
             check=False,
         )
-        text = completed.stdout.strip()
-        if completed.returncode == 0 and text and text != "(null)":
-            return text
-    raise RuntimeError("No PDF text extraction backend available")
+        if completed.returncode != 0:
+            return ""
+        return normalize_pdf_text(completed.stdout)
+    except Exception:
+        return ""
+
+
+def extract_pdf_text_via_pypdf(path: Path) -> str:
+    try:
+        import pypdf  # type: ignore
+
+        reader = pypdf.PdfReader(str(path))
+        return normalize_pdf_text("\n".join(page.extract_text() or "" for page in reader.pages))
+    except Exception:
+        return ""
+
+
+def extract_pdf_text_via_ocr(path: Path, ocr_backend: OCRBackend) -> tuple[str, list[str]]:
+    if not shutil.which("pdftoppm"):
+        return "", ["pdftoppm not available for PDF OCR fallback"]
+
+    page_texts: list[str] = []
+    errors: list[str] = []
+    with tempfile.TemporaryDirectory(prefix="kb-organizer-pdf-") as tmpdir:
+        prefix = Path(tmpdir) / "page"
+        completed = subprocess.run(
+            ["pdftoppm", "-png", "-r", "200", str(path), str(prefix)],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if completed.returncode != 0:
+            return "", [completed.stderr.strip() or "pdftoppm failed"]
+
+        pages = sorted(Path(tmpdir).glob("page-*.png"))
+        if not pages:
+            return "", ["pdftoppm produced no rasterized pages"]
+
+        for index, page_image in enumerate(pages, start=1):
+            result = ocr_backend.extract(page_image)
+            if result.status == "ok" and result.text:
+                page_texts.append(f"## Page {index}\n\n{result.text.strip()}")
+            elif result.status not in {"empty", "unavailable"}:
+                errors.append(f"page {index}: {result.error or result.status}")
+            elif result.status == "unavailable":
+                errors.append(f"page {index}: OCR backend unavailable")
+        return "\n\n".join(page_texts).strip(), errors
+
+
+def normalize_pdf_text(text: str) -> str:
+    return text.replace("\f", "\n\n").strip()
+
+
+def pdf_has_meaningful_text(text: str, min_chars: int = 24) -> bool:
+    visible_chars = re.findall(r"[A-Za-z0-9\u4e00-\u9fff]", text)
+    return len(visible_chars) >= min_chars
+
+
+def extract_text_from_paddle_result(result: Any) -> str:
+    lines: list[str] = []
+
+    def walk(node: Any) -> None:
+        if isinstance(node, dict):
+            for key, value in node.items():
+                if key in {"text", "rec_text", "transcription"} and isinstance(value, str):
+                    cleaned = clean_text(value)
+                    if cleaned:
+                        lines.append(cleaned)
+                elif key == "rec_texts" and isinstance(value, list):
+                    for item in value:
+                        if isinstance(item, str):
+                            cleaned = clean_text(item)
+                            if cleaned:
+                                lines.append(cleaned)
+                else:
+                    walk(value)
+            return
+
+        if isinstance(node, (list, tuple)):
+            if len(node) == 2 and isinstance(node[0], str) and isinstance(node[1], (int, float)):
+                cleaned = clean_text(node[0])
+                if cleaned:
+                    lines.append(cleaned)
+                return
+            for item in node:
+                walk(item)
+
+    walk(result)
+    return "\n".join(dedupe(lines))
 
 
 def find_content_root(soup: BeautifulSoup) -> Tag:
