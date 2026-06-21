@@ -52,16 +52,17 @@ pip install pandas requests beautifulsoup4 pillow
 Recommended extras:
 
 ```bash
-pip install pypdf openpyxl lxml
+pip install paddleocr pypdf openpyxl lxml
 ```
 
-Optional OCR:
+Recommended system PDF tools:
 
 ```bash
-pip install pytesseract
+# macOS
+brew install poppler
 ```
 
-System OCR example on macOS:
+Fallback system OCR example on macOS:
 
 ```bash
 brew install tesseract
@@ -87,6 +88,13 @@ python3 scripts/organize_kb.py \
   --mode web \
   --crawl-limit 40
 ```
+
+## PDF and OCR strategy
+
+- images: `PaddleOCR` first, then `tesseract` CLI as fallback
+- text PDFs: `pdftotext` from Poppler first
+- scanned PDFs: `pdftoppm` from Poppler to rasterize pages, then OCR the page images
+- originals are always preserved even when extraction fails
 
 ## Recommended downstream workflow
 
