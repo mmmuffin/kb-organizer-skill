@@ -4,19 +4,12 @@ Organize a local folder or documentation website into a retrieval-ready local kn
 
 This repository is intentionally structured as a **single installable skill root**, so the repository root is the skill directory itself.
 
-## What it does
+## What changed in v1.2
 
-- sync a public documentation site into a local knowledge package
-- normalize mixed local documents into Markdown
-- preserve original files and original page HTML
-- preserve images as first-class artifacts
-- generate OCR sidecar text for images when possible
-- emit retrieval-oriented outputs such as:
-  - `data_structure.md`
-  - `manifest.json`
-  - `image_manifest.json`
-  - `source_map.json`
-  - `run_report.json`
+- default OCR profile is now `mobile`, not a heavy server-grade default
+- the organizer can start on a fresh machine and detect missing runtime dependencies
+- when dependencies are missing, the organizer can show a bootstrap plan and install the recommended stack after confirmation
+- if installation is skipped or fails, the run can still continue in degraded mode and record the loss of recall capability in `run_report.json`
 
 ## Repository structure
 
@@ -41,60 +34,111 @@ cp -R . "${CODEX_HOME:-$HOME/.codex}/skills/knowledge-base-organizer"
 
 If you cloned the repo elsewhere, copy the whole repo directory, not just individual files.
 
-## Runtime dependencies
+## Fastest way to start
 
-Core Python packages:
-
-```bash
-pip install pandas requests beautifulsoup4 pillow
-```
-
-Recommended extras:
+Check the current machine:
 
 ```bash
-pip install paddleocr pypdf openpyxl lxml
+python3 scripts/organize_kb.py --check-deps
 ```
 
-Recommended system PDF tools:
-
-```bash
-# macOS
-brew install poppler
-```
-
-Fallback system OCR example on macOS:
-
-```bash
-brew install tesseract
-```
-
-## Quick start
-
-Local folder:
+Organize a local knowledge source with the default lightweight profile:
 
 ```bash
 python3 scripts/organize_kb.py \
   --input /absolute/path/to/source-folder \
   --output /absolute/path/to/organized-kb \
-  --mode local
+  --mode local \
+  --ocr-profile mobile
 ```
 
-Documentation website:
+Organize a documentation website:
 
 ```bash
 python3 scripts/organize_kb.py \
   --input https://docs.example.com/start-page \
   --output /absolute/path/to/organized-kb \
   --mode web \
+  --ocr-profile mobile \
   --crawl-limit 40
 ```
 
-## PDF and OCR strategy
+## Fresh-machine behavior
 
-- images: `PaddleOCR` first, then `tesseract` CLI as fallback
-- text PDFs: `pdftotext` from Poppler first
-- scanned PDFs: `pdftoppm` from Poppler to rasterize pages, then OCR the page images
-- originals are always preserved even when extraction fails
+By default:
+
+- `--ocr-profile mobile`
+- `--install-missing prompt`
+- interactive terminal: show the bootstrap plan, ask for confirmation, then install
+- non-interactive terminal: do not auto-install, continue in degraded mode when possible
+
+Manual bootstrap is also available:
+
+```bash
+python3 scripts/bootstrap_env.py --profile mobile
+```
+
+Non-interactive bootstrap for CI or automated setup:
+
+```bash
+python3 scripts/bootstrap_env.py --profile mobile --yes
+```
+
+## Runtime profiles
+
+### `none`
+
+- best for text-first knowledge bases
+- no OCR guarantee
+- scanned PDFs will not become retrieval-ready text
+
+### `mobile`
+
+- default profile
+- recommended for new laptops, desktops, and Ubuntu VPSes
+- uses:
+  - `PP-OCRv5_mobile_det`
+  - `PP-OCRv5_mobile_rec`
+- best balance of size, speed, and recall quality
+
+### `server`
+
+- heavier profile
+- only use when the user explicitly wants higher OCR accuracy and accepts higher runtime cost
+
+## PDF and image strategy
+
+- native-text PDFs: `pdftotext` first, then `pypdf`
+- scanned PDFs: `pdftoppm` to rasterize pages, then OCR the page images
+- standalone images: preserve the image and generate OCR sidecar text when possible
+- temporary page images for scanned-PDF OCR are stored in a temp directory and removed after processing
+
+## What “degraded mode” means
+
+If the recommended stack is unavailable and bootstrap is skipped or fails:
+
+- the organizer still preserves originals
+- text-like files can still be normalized when their own dependencies exist
+- images still enter `image_manifest.json`
+- scanned PDFs still remain traceable through originals and failure records
+- `run_report.json` records:
+  - dependency status
+  - selected OCR profile
+  - capability matrix
+  - whether the run was degraded
+
+## How downstream retrieval should recall images
+
+Retrieval should not rely on OCR text alone. Use:
+
+- `image_manifest.json`
+- parent document relationship
+- `title_or_alt`
+- `context_excerpt`
+- `source_uri`
+- OCR sidecar text when available
+
+This lets downstream agents recall the right image even when OCR is partial or unavailable.
 
 ## Recommended downstream workflow
 
@@ -110,3 +154,4 @@ raw knowledge source
 
 - Chinese documentation: [`README.zh-CN.md`](./README.zh-CN.md)
 - Skill instructions for Codex: [`SKILL.md`](./SKILL.md)
+- Capability notes: [`references/capability-matrix.md`](./references/capability-matrix.md)
