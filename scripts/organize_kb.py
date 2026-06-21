@@ -7,11 +7,13 @@ import argparse
 import datetime as dt
 import hashlib
 import html
+import importlib.util
 import json
 import os
 import re
 import shutil
 import subprocess
+import sys
 import tempfile
 import urllib.parse
 import xml.etree.ElementTree as ET
@@ -20,10 +22,31 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Iterable
 
-import pandas as pd
-import requests
-from bs4 import BeautifulSoup, NavigableString, Tag
-from PIL import Image
+try:
+    import pandas as pd
+except Exception:  # pragma: no cover - dependency bootstrap path
+    pd = None  # type: ignore[assignment]
+
+try:
+    import requests
+except Exception:  # pragma: no cover - dependency bootstrap path
+    requests = None  # type: ignore[assignment]
+
+try:
+    from bs4 import BeautifulSoup, NavigableString, Tag
+except Exception:  # pragma: no cover - dependency bootstrap path
+    BeautifulSoup = None  # type: ignore[assignment]
+
+    class NavigableString(str):
+        pass
+
+    class Tag:  # type: ignore[no-redef]
+        pass
+
+try:
+    from PIL import Image
+except Exception:  # pragma: no cover - dependency bootstrap path
+    Image = None  # type: ignore[assignment]
 
 USER_AGENT = "KnowledgeBaseOrganizer/1.0"
 TEXT_EXTENSIONS = {".md", ".markdown", ".txt"}
@@ -36,6 +59,54 @@ STOPWORDS = {
     "the", "and", "for", "with", "from", "that", "this", "into", "your", "have",
     "will", "when", "what", "how", "why", "are", "use", "using", "can", "not",
     "文档", "知识库", "以及", "这个", "那个", "一个", "我们", "你们", "页面", "目录", "内容",
+}
+CORE_PYTHON_DEPENDENCIES = {
+    "pandas": "spreadsheet normalization",
+    "requests": "web fetching",
+    "bs4": "HTML extraction",
+    "PIL": "image inspection",
+}
+OPTIONAL_PYTHON_DEPENDENCIES = {
+    "paddlepaddle": "Paddle runtime for PaddleOCR",
+    "paddleocr": "primary OCR backend for images and scanned PDFs",
+    "pypdf": "Python PDF text fallback",
+    "openpyxl": "xlsx support through pandas",
+    "lxml": "faster and more robust HTML/XML parsing",
+}
+SYSTEM_DEPENDENCIES = {
+    "pdftotext": "native-text PDF extraction via Poppler",
+    "pdftoppm": "scanned-PDF page rasterization via Poppler",
+    "tesseract": "fallback OCR backend",
+}
+PADDLE_MODELS = {
+    "mobile": {
+        "det": "PP-OCRv5_mobile_det",
+        "rec": "PP-OCRv5_mobile_rec",
+        "label": "PaddleOCR mobile profile",
+    },
+    "server": {
+        "det": "PP-OCRv5_server_det",
+        "rec": "PP-OCRv5_server_rec",
+        "label": "PaddleOCR server profile",
+    },
+}
+PROFILE_DEPENDENCIES = {
+    "none": {
+        "python": ["pandas", "requests", "bs4", "PIL", "pypdf", "openpyxl", "lxml"],
+        "system": [],
+    },
+    "mobile": {
+        "python": ["pandas", "requests", "bs4", "PIL", "paddlepaddle", "paddleocr", "pypdf", "openpyxl", "lxml"],
+        "system": ["pdftotext", "pdftoppm"],
+    },
+    "server": {
+        "python": ["pandas", "requests", "bs4", "PIL", "paddlepaddle", "paddleocr", "pypdf", "openpyxl", "lxml"],
+        "system": ["pdftotext", "pdftoppm"],
+    },
+}
+MODULE_DISPLAY_NAMES = {
+    "bs4": "beautifulsoup4",
+    "PIL": "Pillow",
 }
 
 
@@ -92,14 +163,107 @@ class RunReport:
     failures: list[dict[str, str]] = field(default_factory=list)
     skipped: list[dict[str, str]] = field(default_factory=list)
     validations: list[dict[str, Any]] = field(default_factory=list)
+    environment: dict[str, Any] = field(default_factory=dict)
+
+
+def refresh_runtime_imports() -> None:
+    global pd, requests, BeautifulSoup, NavigableString, Tag, Image
+
+    importlib.invalidate_caches()
+
+    if pd is None and module_available("pandas"):
+        import pandas as _pandas
+
+        pd = _pandas  # type: ignore[assignment]
+
+    if requests is None and module_available("requests"):
+        import requests as _requests
+
+        requests = _requests  # type: ignore[assignment]
+
+    if BeautifulSoup is None and module_available("bs4"):
+        from bs4 import BeautifulSoup as _BeautifulSoup
+        from bs4 import NavigableString as _NavigableString
+        from bs4 import Tag as _Tag
+
+        BeautifulSoup = _BeautifulSoup  # type: ignore[assignment]
+        NavigableString = _NavigableString  # type: ignore[assignment]
+        Tag = _Tag  # type: ignore[assignment]
+
+    if Image is None and module_available("PIL"):
+        from PIL import Image as _Image
+
+        Image = _Image  # type: ignore[assignment]
+
+
+def is_interactive_terminal() -> bool:
+    return sys.stdin.isatty() and sys.stdout.isatty()
+
+
+def profile_label(profile: str) -> str:
+    if profile in PADDLE_MODELS:
+        return PADDLE_MODELS[profile]["label"]
+    return "No OCR profile"
+
+
+def default_model_source() -> str:
+    return os.environ.get("PADDLE_PDX_MODEL_SOURCE") or "bos"
+
+
+def ensure_model_source_env() -> None:
+    os.environ.setdefault("PADDLE_PDX_MODEL_SOURCE", default_model_source())
+
+
+def build_bootstrap_command(profile: str, yes: bool) -> list[str]:
+    command = [sys.executable, str(Path(__file__).with_name("bootstrap_env.py")), "--profile", profile]
+    if yes:
+        command.append("--yes")
+    return command
+
+
+def run_bootstrap(profile: str, mode: str) -> dict[str, Any]:
+    attempted = False
+    success = False
+    note = ""
+
+    if profile == "none" or mode == "no":
+        return {"attempted": attempted, "success": success, "note": note}
+
+    command = build_bootstrap_command(profile, yes=False)
+    if mode == "yes":
+        attempted = True
+        completed = subprocess.run(build_bootstrap_command(profile, yes=True), check=False)
+        success = completed.returncode == 0
+        note = "automatic install requested"
+    else:
+        if not is_interactive_terminal():
+            return {
+                "attempted": attempted,
+                "success": success,
+                "note": "non-interactive terminal; skipped automatic installation",
+            }
+        print("[knowledge-base-organizer] Missing recommended dependencies for this profile.")
+        subprocess.run(command + ["--print-plan"], check=False)
+        reply = input("Install recommended dependencies now? [y/N] ").strip().lower()
+        if reply not in {"y", "yes"}:
+            return {"attempted": attempted, "success": success, "note": "user declined dependency installation"}
+        attempted = True
+        completed = subprocess.run(build_bootstrap_command(profile, yes=True), check=False)
+        success = completed.returncode == 0
+        note = "prompted install requested"
+
+    refresh_runtime_imports()
+    return {"attempted": attempted, "success": success, "note": note}
 
 
 class OCRBackend:
-    def __init__(self, preferred: str = "auto") -> None:
-        self.preferred = preferred
+    def __init__(self, profile: str = "mobile") -> None:
+        self.profile = profile
         self._paddle_instance: Any | None = None
 
     def extract(self, image_path: Path) -> OCRResult:
+        if self.profile == "none":
+            return OCRResult(text="", backend="none", status="unavailable", error="OCR profile is disabled")
         for backend in self._candidate_backends():
             if backend == "paddleocr":
                 result = self._extract_paddleocr(image_path)
@@ -114,14 +278,9 @@ class OCRBackend:
         return OCRResult(text="", backend="none", status="unavailable", error="No OCR backend available")
 
     def _candidate_backends(self) -> list[str]:
-        if self.preferred != "auto":
-            return [self.preferred]
         candidates: list[str] = []
-        try:
-            from paddleocr import PaddleOCR  # type: ignore  # noqa: F401
+        if module_available("paddleocr") and module_available("paddlepaddle"):
             candidates.append("paddleocr")
-        except Exception:
-            pass
         if shutil.which("tesseract"):
             candidates.append("tesseract-cli")
         candidates.append("none")
@@ -131,11 +290,20 @@ class OCRBackend:
         try:
             from paddleocr import PaddleOCR  # type: ignore
 
+            ensure_model_source_env()
             if self._paddle_instance is None:
-                # Default to the general Chinese+English model family, which works
-                # reasonably well for mixed Chinese/English documentation screenshots.
-                self._paddle_instance = PaddleOCR(lang="ch")
-            result = self._paddle_instance.ocr(str(image_path), cls=True)
+                model_names = PADDLE_MODELS[self.profile]
+                self._paddle_instance = PaddleOCR(
+                    text_detection_model_name=model_names["det"],
+                    text_recognition_model_name=model_names["rec"],
+                    use_doc_orientation_classify=False,
+                    use_doc_unwarping=False,
+                    use_textline_orientation=False,
+                )
+            if hasattr(self._paddle_instance, "predict"):
+                result = list(self._paddle_instance.predict(str(image_path)))
+            else:
+                result = self._paddle_instance.ocr(str(image_path), cls=False)
             text = extract_text_from_paddle_result(result)
             return OCRResult(text=text, backend="paddleocr", status="ok" if text else "empty")
         except Exception as exc:
@@ -158,22 +326,40 @@ class OCRBackend:
 
 
 class Organizer:
-    def __init__(self, args: argparse.Namespace) -> None:
+    def __init__(
+        self,
+        args: argparse.Namespace,
+        dependency_report: dict[str, Any],
+        capability_report: dict[str, Any],
+        install_state: dict[str, Any],
+    ) -> None:
         self.args = args
         self.input_source = args.input
         self.output_dir = Path(args.output).resolve()
         self.mode = self._detect_mode(args.input, args.mode)
         self.synced_at = iso_now()
         self.report = RunReport(input_source=args.input, mode=self.mode, started_at=self.synced_at)
-        self.ocr_backend = OCRBackend(args.ocr_backend)
+        self.report.environment = {
+            "dependencies": dependency_report,
+            "capabilities": capability_report,
+            "ocr_profile": args.ocr_profile,
+            "install_missing": args.install_missing,
+            "degraded_run": capability_report["full_retrieval_ready_for_pdf_image_heavy_kb"]["status"] != "ok",
+            "install_state": install_state,
+            "warnings": capability_warnings(capability_report),
+        }
+        self.ocr_backend = OCRBackend(args.ocr_profile)
         self.documents: list[DocumentRecord] = []
         self.images: list[ImageRecord] = []
         self.source_map: dict[str, dict[str, Any]] = {"documents": {}, "images": {}}
         self.image_id_by_source: dict[str, str] = {}
-        self.session = requests.Session()
-        self.session.headers.update({"User-Agent": USER_AGENT})
+        self.session = requests.Session() if requests is not None else None
+        if self.session is not None:
+            self.session.headers.update({"User-Agent": USER_AGENT})
+        self.capability_report = capability_report
 
     def run(self) -> None:
+        emit_runtime_dependency_warnings(self.capability_report, self.args)
         if self.output_dir.exists() and any(self.output_dir.iterdir()):
             raise SystemExit(f"Output directory must be new or empty: {self.output_dir}")
         self._ensure_output_dirs()
@@ -248,6 +434,8 @@ class Organizer:
                 self.report.failures.append({"source": source_uri, "reason": str(exc)})
 
     def organize_web(self, start_url: str) -> None:
+        if self.session is None:
+            raise SystemExit("Web mode requires the `requests` dependency. Run `--check-deps` or bootstrap first.")
         for url in self.collect_web_urls(start_url):
             try:
                 response = self.session.get(url, timeout=self.args.timeout)
@@ -301,6 +489,10 @@ class Organizer:
         return self.crawl_web_urls(start_url)
 
     def crawl_web_urls(self, start_url: str) -> list[str]:
+        if self.session is None:
+            raise RuntimeError("Web crawling requires the `requests` dependency.")
+        if BeautifulSoup is None:
+            raise RuntimeError("Web crawling requires `beautifulsoup4`.")
         queue = [start_url]
         seen: set[str] = set()
         collected: list[str] = []
@@ -369,6 +561,8 @@ class Organizer:
         local_base: Path | None,
         doc_rel: Path,
     ) -> tuple[str, list[str], list[str]]:
+        if BeautifulSoup is None:
+            raise RuntimeError("HTML normalization requires `beautifulsoup4`.")
         soup = BeautifulSoup(html_text, "html.parser")
         root = find_content_root(soup)
         headings: list[str] = []
@@ -518,6 +712,8 @@ class Organizer:
         ensure_parent(dest)
         try:
             if parsed.scheme in {"http", "https"}:
+                if self.session is None:
+                    raise RuntimeError("Remote image fetching requires the `requests` dependency.")
                 response = self.session.get(image_source, timeout=self.args.timeout)
                 response.raise_for_status()
                 dest.write_bytes(response.content)
@@ -648,16 +844,195 @@ class Organizer:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--input", required=True, help="Source folder path or documentation URL")
-    parser.add_argument("--output", required=True, help="New output directory for the organized knowledge package")
+    parser.add_argument("--input", help="Source folder path or documentation URL")
+    parser.add_argument("--output", help="New output directory for the organized knowledge package")
     parser.add_argument("--mode", choices=["auto", "local", "web"], default="auto")
-    parser.add_argument("--ocr-backend", default="auto", help="OCR backend: auto, paddleocr, tesseract-cli, none")
+    parser.add_argument("--ocr-profile", choices=["mobile", "server", "none"], default="mobile", help="OCR profile: mobile, server, none")
+    parser.add_argument("--install-missing", choices=["prompt", "yes", "no"], default="prompt", help="How to handle missing recommended dependencies")
+    parser.add_argument("--ocr-backend", choices=["auto", "paddleocr", "tesseract-cli", "none"], help=argparse.SUPPRESS)
     parser.add_argument("--sitemap-url", help="Optional sitemap URL for web mode")
     parser.add_argument("--crawl-limit", type=int, default=40, help="Maximum number of pages to collect in web mode")
     parser.add_argument("--timeout", type=int, default=30, help="HTTP timeout in seconds")
     parser.add_argument("--same-host-only", action=argparse.BooleanOptionalAction, default=True, help="Restrict crawling to the same host")
     parser.add_argument("--path-prefix-only", action=argparse.BooleanOptionalAction, default=False, help="Restrict crawling to the same path prefix")
+    parser.add_argument("--check-deps", action="store_true", help="Print dependency status and capability matrix, then exit")
+    parser.add_argument("--strict-deps", action="store_true", help="Abort unless the recommended OCR/PDF stack is available")
     return parser.parse_args()
+
+
+def module_available(name: str) -> bool:
+    return importlib.util.find_spec(name) is not None
+
+
+def command_available(name: str) -> bool:
+    return shutil.which(name) is not None
+
+
+def detect_installers() -> dict[str, bool]:
+    return {
+        "brew": command_available("brew"),
+        "apt-get": command_available("apt-get"),
+        "sudo": command_available("sudo"),
+    }
+
+
+def missing_profile_dependencies(dependency_report: dict[str, Any], profile: str) -> dict[str, list[str]]:
+    required = PROFILE_DEPENDENCIES[profile]
+    missing_python = [
+        MODULE_DISPLAY_NAMES.get(name, name)
+        for name in required["python"]
+        if not dependency_report["python"]["core"].get(name, dependency_report["python"]["optional"].get(name, {})).get("installed", False)
+    ]
+    missing_system = [
+        name
+        for name in required["system"]
+        if not dependency_report["system"].get(name, {}).get("installed", False)
+    ]
+    return {"python": missing_python, "system": missing_system}
+
+
+def build_dependency_report() -> dict[str, Any]:
+    python_dependencies = {
+        "core": {
+            name: {
+                "display_name": MODULE_DISPLAY_NAMES.get(name, name),
+                "installed": module_available(name),
+                "purpose": purpose,
+            }
+            for name, purpose in CORE_PYTHON_DEPENDENCIES.items()
+        },
+        "optional": {
+            name: {
+                "display_name": MODULE_DISPLAY_NAMES.get(name, name),
+                "installed": module_available(name),
+                "purpose": purpose,
+            }
+            for name, purpose in OPTIONAL_PYTHON_DEPENDENCIES.items()
+        },
+    }
+    system_dependencies = {
+        name: {
+            "installed": command_available(name),
+            "purpose": purpose,
+        }
+        for name, purpose in SYSTEM_DEPENDENCIES.items()
+    }
+    return {
+        "python": python_dependencies,
+        "system": system_dependencies,
+        "installers": detect_installers(),
+    }
+
+
+def build_capability_report(dependency_report: dict[str, Any], profile: str) -> dict[str, Any]:
+    optional = dependency_report["python"]["optional"]
+    core = dependency_report["python"]["core"]
+    system_deps = dependency_report["system"]
+
+    text_first_ready = all(info["installed"] for info in core.values())
+    image_ocr = profile != "none" and (
+        (optional["paddleocr"]["installed"] and optional["paddlepaddle"]["installed"])
+        or system_deps["tesseract"]["installed"]
+    )
+    scanned_pdf_ocr = system_deps["pdftoppm"]["installed"] and image_ocr
+    native_pdf_text = system_deps["pdftotext"]["installed"] or optional["pypdf"]["installed"]
+    full_retrieval_ready = native_pdf_text and scanned_pdf_ocr and image_ocr
+
+    return {
+        "text_first_knowledge_base": {
+            "status": "ok" if text_first_ready else "missing",
+            "details": "Markdown, text, HTML, CSV, and XLSX pipelines are available when core Python dependencies are installed.",
+        },
+        "native_pdf_text": {
+            "status": "ok" if native_pdf_text else "missing",
+            "details": "Needs Poppler `pdftotext` or Python `pypdf`.",
+        },
+        "image_ocr": {
+            "status": "ok" if image_ocr else "missing",
+            "details": "Needs `paddleocr` or the `tesseract` CLI.",
+        },
+        "scanned_pdf_ocr": {
+            "status": "ok" if scanned_pdf_ocr else "missing",
+            "details": "Needs Poppler `pdftoppm` plus an OCR backend.",
+        },
+        "full_retrieval_ready_for_pdf_image_heavy_kb": {
+            "status": "ok" if full_retrieval_ready else "degraded",
+            "details": f"Recommended stack for `{profile}` is Poppler (`pdftotext` + `pdftoppm`) plus {profile_label(profile).lower()}.",
+        },
+    }
+
+
+def capability_warnings(capability_report: dict[str, Any]) -> list[str]:
+    warnings: list[str] = []
+    if capability_report["text_first_knowledge_base"]["status"] != "ok":
+        warnings.append(
+            "Some core text/html/tabular dependencies are unavailable. Certain file types may fail or be skipped."
+        )
+    if capability_report["image_ocr"]["status"] != "ok":
+        warnings.append(
+            "Image OCR is unavailable. Images will still be preserved, but OCR sidecars and image recall will be degraded."
+        )
+    if capability_report["native_pdf_text"]["status"] != "ok":
+        warnings.append(
+            "Native-text PDF extraction is unavailable. Text PDFs will rely on weaker fallbacks or fail explicitly."
+        )
+    if capability_report["scanned_pdf_ocr"]["status"] != "ok":
+        warnings.append(
+            "Scanned-PDF OCR is unavailable. Image-based PDFs will not become retrieval-ready text."
+        )
+    return warnings
+
+
+def strict_dependency_errors(capability_report: dict[str, Any], profile: str) -> list[str]:
+    errors: list[str] = []
+    if capability_report["text_first_knowledge_base"]["status"] != "ok":
+        errors.append("Missing core text/html/tabular normalization dependencies.")
+    if capability_report["native_pdf_text"]["status"] != "ok":
+        errors.append("Missing PDF text extraction support (`pdftotext` or `pypdf`).")
+    if profile != "none" and capability_report["image_ocr"]["status"] != "ok":
+        errors.append("Missing image OCR support (`paddleocr` or `tesseract`).")
+    if profile != "none" and capability_report["scanned_pdf_ocr"]["status"] != "ok":
+        errors.append("Missing scanned-PDF OCR support (`pdftoppm` plus OCR backend).")
+    return errors
+
+
+def emit_runtime_dependency_warnings(capability_report: dict[str, Any], args: argparse.Namespace) -> None:
+    if args.strict_deps:
+        return
+    for warning in capability_warnings(capability_report):
+        print(f"[knowledge-base-organizer] Warning: {warning}", file=sys.stderr)
+
+
+def print_dependency_report(dependency_report: dict[str, Any], capability_report: dict[str, Any]) -> None:
+    print("# Dependency Report")
+    print("")
+    print("## Python Dependencies")
+    for group_name in ["core", "optional"]:
+        print(f"### {group_name}")
+        for name, info in dependency_report["python"][group_name].items():
+            status = "installed" if info["installed"] else "missing"
+            print(f"- {info['display_name']}: {status} — {info['purpose']}")
+        print("")
+
+    print("## System Dependencies")
+    for name, info in dependency_report["system"].items():
+        status = "installed" if info["installed"] else "missing"
+        print(f"- {name}: {status} — {info['purpose']}")
+    print("")
+
+    print("## Capability Matrix")
+    for name, info in capability_report.items():
+        print(f"- {name}: {info['status']} — {info['details']}")
+    print("")
+
+    print("## Recommendation")
+    if capability_report["full_retrieval_ready_for_pdf_image_heavy_kb"]["status"] == "ok":
+        print("- Environment is ready for mixed text/PDF/image knowledge bases.")
+    else:
+        print("- Environment is only partially ready.")
+        print("- Text-heavy knowledge bases can still be organized.")
+        print("- For PDF/image-heavy knowledge bases, install Poppler and the mobile OCR stack first.")
+        print("- Run `python3 scripts/bootstrap_env.py --profile mobile` after reviewing the plan.")
 
 
 def classify_file(path: Path) -> str:
@@ -736,6 +1111,8 @@ def first_summary_line(body: str) -> str:
 
 
 def extract_spreadsheet_markdown(path: Path) -> str:
+    if pd is None:
+        raise RuntimeError("Spreadsheet normalization requires `pandas`.")
     suffix = path.suffix.lower()
     sections: list[str] = []
     if suffix in {".csv", ".tsv"}:
@@ -1007,6 +1384,8 @@ def strip_fragment(url: str) -> str:
 
 
 def image_dimensions(path: Path) -> tuple[int | None, int | None]:
+    if Image is None:
+        return None, None
     try:
         with Image.open(path) as image:
             return image.width, image.height
@@ -1070,7 +1449,42 @@ def relative_ref_to_image(image_path: str | None, doc_rel: Path) -> str | None:
 
 def main() -> None:
     args = parse_args()
-    organizer = Organizer(args)
+    if args.ocr_backend:
+        legacy_map = {
+            "auto": "mobile",
+            "paddleocr": "mobile",
+            "tesseract-cli": "mobile",
+            "none": "none",
+        }
+        args.ocr_profile = legacy_map[args.ocr_backend]
+
+    dependency_report = build_dependency_report()
+    capability_report = build_capability_report(dependency_report, args.ocr_profile)
+
+    if args.check_deps:
+        print_dependency_report(dependency_report, capability_report)
+        return
+
+    if not args.input or not args.output:
+        raise SystemExit("--input and --output are required unless --check-deps is used")
+
+    install_state = {"attempted": False, "success": False, "note": ""}
+    missing = missing_profile_dependencies(dependency_report, args.ocr_profile)
+    if (missing["python"] or missing["system"]) and args.install_missing != "no":
+        install_state = run_bootstrap(args.ocr_profile, args.install_missing)
+        dependency_report = build_dependency_report()
+        capability_report = build_capability_report(dependency_report, args.ocr_profile)
+
+    if args.strict_deps:
+        errors = strict_dependency_errors(capability_report, args.ocr_profile)
+        if errors:
+            raise SystemExit(
+                "Strict dependency check failed:\n- "
+                + "\n- ".join(errors)
+                + "\nInstall the recommended stack first, then rerun."
+            )
+
+    organizer = Organizer(args, dependency_report, capability_report, install_state)
     organizer.run()
     print(f"Organized knowledge base written to {organizer.output_dir}")
 
