@@ -4,12 +4,19 @@ Organize a local folder or documentation website into a retrieval-ready local kn
 
 This repository is intentionally structured as a **single installable skill root**, so the repository root is the skill directory itself.
 
-## What changed in v1.2
+## What changed in v1.2.1
 
 - default OCR profile is now `mobile`, not a heavy server-grade default
 - the organizer can start on a fresh machine and detect missing runtime dependencies
 - when dependencies are missing, the organizer can show a bootstrap plan and install the recommended stack after confirmation
 - if installation is skipped or fails, the run can still continue in degraded mode and record the loss of recall capability in `run_report.json`
+- local Markdown image references are now rewritten to packaged `images/` artifacts
+- document-linked images now keep stronger recall metadata:
+  - `manifest.json.related_images`
+  - `image_manifest.json.parent_document_id`
+  - `context_excerpt`
+  - rewritten normalized image paths
+- `data_structure.md` now surfaces source provenance and image-linked retrieval hints
 
 ## Repository structure
 
@@ -113,6 +120,19 @@ python3 scripts/bootstrap_env.py --profile mobile --yes
 - standalone images: preserve the image and generate OCR sidecar text when possible
 - temporary page images for scanned-PDF OCR are stored in a temp directory and removed after processing
 
+## What “retrieval-ready” now means
+
+For mixed document libraries, the organizer now tries to preserve the full recall chain instead of
+only preserving files:
+
+- a normalized document keeps `related_images`
+- a preserved image keeps `parent_document_id` when the organizer can infer its parent document
+- local Markdown and HTML image references are rewritten to packaged `images/` files
+- `context_excerpt`, `title_or_alt`, and `source_uri` stay available for downstream retrieval
+
+This matters because downstream agents usually need to answer questions like “show me the diagram
+from that guide” or “which screenshot explains this flow,” not just “list all image files.”
+
 ## What “degraded mode” means
 
 If the recommended stack is unavailable and bootstrap is skipped or fails:
@@ -132,6 +152,7 @@ If the recommended stack is unavailable and bootstrap is skipped or fails:
 Retrieval should not rely on OCR text alone. Use:
 
 - `image_manifest.json`
+- `manifest.json.related_images`
 - parent document relationship
 - `title_or_alt`
 - `context_excerpt`
