@@ -173,16 +173,17 @@ pip install pandas requests beautifulsoup4 pillow
 推荐依赖：
 
 ```bash
-pip install pypdf openpyxl lxml
+pip install paddleocr pypdf openpyxl lxml
 ```
 
-OCR 可选依赖：
+推荐安装的 PDF 工具：
 
 ```bash
-pip install pytesseract
+# macOS
+brew install poppler
 ```
 
-如果你走系统 OCR，还需要安装 `tesseract`：
+如果你还想保留轻量 OCR 兜底，可以再安装 `tesseract`：
 
 ```bash
 # macOS
@@ -193,7 +194,7 @@ brew install tesseract
 
 - 没有 OCR，Skill 仍然能跑
 - 只是图片不会产出 OCR 文本，而是记录为 `unavailable`
-- 没有 `pypdf` 时，PDF 提取能力会更弱
+- 没有 `poppler` 时，PDF 文本提取和扫描 PDF OCR 回退能力会明显变弱
 
 ---
 
@@ -244,7 +245,7 @@ python3 scripts/organize_kb.py \
   --input /absolute/path/to/source-folder \
   --output /absolute/path/to/organized-kb \
   --mode local \
-  --ocr-backend pytesseract
+  --ocr-backend paddleocr
 ```
 
 ### 示例 4：指定 sitemap
@@ -277,7 +278,7 @@ python3 scripts/organize_kb.py \
 
 - `--ocr-backend`
   - OCR 后端
-  - 支持 `auto`、`pytesseract`、`tesseract-cli`、`none`
+  - 支持 `auto`、`paddleocr`、`tesseract-cli`、`none`
 
 - `--sitemap-url`
   - 在线文档站的 sitemap 地址
@@ -531,9 +532,24 @@ polymarket-kb/
 优先顺序：
 
 1. 用户显式指定后端
-2. `pytesseract`
+2. `PaddleOCR`
 3. `tesseract` CLI
 4. `none`
+
+### PDF 当前方案
+
+PDF 不再只走单一路径，而是分层处理：
+
+1. 先保留原始 PDF
+2. 优先用 Poppler 的 `pdftotext` 提取文本型 PDF
+3. 如果提取结果不足，再尝试 Python 文本回退
+4. 如果仍然没有有效文本，则用 Poppler 的 `pdftoppm` 把 PDF 页面转图片
+5. 再把页面图片交给 OCR 后端识别
+
+所以当前 v2 的组合是：
+
+- 图片 OCR：`PaddleOCR -> tesseract`
+- PDF：`pdftotext -> Python fallback -> pdftoppm + OCR`
 
 ### OCR 失败怎么办
 
